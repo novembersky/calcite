@@ -33,7 +33,9 @@ import org.apache.calcite.rel.core.Intersect;
 import org.apache.calcite.rel.core.Join;
 import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rel.core.Minus;
+import org.apache.calcite.rel.core.RelFactories;
 import org.apache.calcite.rel.core.Union;
+import org.apache.calcite.rel.logical.LogicalProject;
 import org.apache.calcite.rel.logical.LogicalTableModify;
 import org.apache.calcite.rel.metadata.CachingRelMetadataProvider;
 import org.apache.calcite.rel.metadata.ChainedRelMetadataProvider;
@@ -111,8 +113,6 @@ import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.Assert.assertTrue;
-
-
 
 /**
  * Unit test for rules in {@code org.apache.calcite.rel} and subpackages.
@@ -1875,7 +1875,10 @@ public class RelOptRulesTest extends RelOptTestBase {
             + " where a - b < 21");
   }
 
-  @Ignore @Test public void testReduceCase() throws Exception {
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-1439">[CALCITE-1439]
+   * Handling errors during constant reduction</a>. */
+  @Test public void testReduceCase() throws Exception {
     HepProgram program = new HepProgramBuilder()
         .addRuleInstance(ReduceExpressionsRule.PROJECT_INSTANCE)
         .build();
@@ -1887,6 +1890,34 @@ public class RelOptRulesTest extends RelOptTestBase {
     sql(sql).with(program)
         .withProperty(Hook.REL_BUILDER_SIMPLIFY, false)
         .check();
+  }
+
+  private void checkReduceNullableToNotNull(ReduceExpressionsRule rule) {
+    HepProgram program = new HepProgramBuilder()
+        .addRuleInstance(rule)
+        .build();
+
+    final String sql = "select\n"
+        + "  empno + case when 'a' = 'a' then 1 else null end as newcol\n"
+        + "from emp";
+    sql(sql).with(program)
+        .withProperty(Hook.REL_BUILDER_SIMPLIFY, false)
+        .check();
+  }
+
+  /** Test case that reduces a nullable expression to a NOT NULL literal that
+   *  is cast to nullable. */
+  @Test public void testReduceNullableToNotNull() throws Exception {
+    checkReduceNullableToNotNull(ReduceExpressionsRule.PROJECT_INSTANCE);
+  }
+
+  /** Test case that reduces a nullable expression to a NOT NULL literal. */
+  @Test public void testReduceNullableToNotNull2() throws Exception {
+    final ReduceExpressionsRule.ProjectReduceExpressionsRule rule =
+        new ReduceExpressionsRule.ProjectReduceExpressionsRule(
+            LogicalProject.class, false,
+            RelFactories.LOGICAL_BUILDER);
+    checkReduceNullableToNotNull(rule);
   }
 
   @Test public void testReduceConstantsIsNull() throws Exception {
@@ -2211,7 +2242,8 @@ public class RelOptRulesTest extends RelOptTestBase {
 
         // Simulate the way INSERT will insert casts to the target types
         .addRuleInstance(
-            new CoerceInputsRule(LogicalTableModify.class, false))
+            new CoerceInputsRule(LogicalTableModify.class, false,
+                RelFactories.LOGICAL_BUILDER))
 
             // Convert projects to calcs, merge two calcs, and then
             // reduce redundant casts in merged calc.
@@ -2618,6 +2650,14 @@ public class RelOptRulesTest extends RelOptTestBase {
     transitiveInference(ReduceExpressionsRule.FILTER_INSTANCE);
   }
 
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-1995">[CALCITE-1995]
+   * Remove predicates from Filter if they can be proved to be always true or
+   * false</a>. */
+  @Test public void testSimplifyFilter() throws Exception {
+    transitiveInference(ReduceExpressionsRule.FILTER_INSTANCE);
+  }
+
   @Test public void testPullConstantIntoJoin() throws Exception {
     transitiveInference(ReduceExpressionsRule.JOIN_INSTANCE);
   }
@@ -2735,6 +2775,23 @@ public class RelOptRulesTest extends RelOptTestBase {
     final String sql = "SELECT\n"
         + "  avg(sum(sal) + 2 * min(empno) + 3 * avg(empno))\n"
         + "  over (partition by deptno)\n"
+        + "from emp\n"
+        + "group by deptno";
+    checkPlanning(program, sql);
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-2078">[CALCITE-2078]
+   * Aggregate functions in OVER clause</a>. */
+  @Test public void testWindowFunctionOnAggregations() {
+    final HepProgram program = HepProgram.builder()
+        .addRuleInstance(ProjectToWindowRule.PROJECT)
+        .build();
+    final String sql = "SELECT\n"
+        + "  min(empno),\n"
+        + "  sum(sal),\n"
+        + "  sum(sum(sal))\n"
+        + "    over (partition by min(empno) order by sum(sal))\n"
         + "from emp\n"
         + "group by deptno";
     checkPlanning(program, sql);
@@ -3330,6 +3387,19 @@ public class RelOptRulesTest extends RelOptTestBase {
         + "  select * from emp e where emp.deptno = e.deptno)\n"
         + "AND NOT EXISTS (\n"
         + "  select * from emp ee where ee.job = emp.job AND ee.sal=34)";
+    checkSubQuery(sql).withLateDecorrelation(true).check();
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-2028">[CALCITE-2028]
+   * Un-correlated IN sub-query should be converted into a Join,
+   * rather than a Correlate without correlation variables </a>. */
+  @Test public void testDecorrelateUncorrelatedInAndCorrelatedExists() throws Exception {
+    final String sql = "select * from sales.emp\n"
+        + "WHERE job in (\n"
+        + "  select job from emp ee where ee.sal=34)"
+        + "AND EXISTS (\n"
+        + "  select * from emp e where emp.deptno = e.deptno)\n";
     checkSubQuery(sql).withLateDecorrelation(true).check();
   }
 

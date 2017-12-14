@@ -469,6 +469,14 @@ public class SqlToRelConverterTest extends SqlToRelTestBase {
     sql(sql).ok();
   }
 
+  @Test public void testAggFilterWithIn() {
+    final String sql = "select\n"
+        + "  deptno, sum(sal * 2) filter (where empno not in (1, 2)), count(*)\n"
+        + "from emp\n"
+        + "group by deptno";
+    sql(sql).ok();
+  }
+
   @Test public void testFakeStar() {
     sql("SELECT * FROM (VALUES (0, 0)) AS T(A, \"*\")").ok();
   }
@@ -661,9 +669,21 @@ public class SqlToRelConverterTest extends SqlToRelTestBase {
     sql(sql).ok();
   }
 
+  @Test public void testOrderOffsetFetchWithDynamicParameter() {
+    final String sql = "select empno from emp\n"
+        + "order by empno offset ? rows fetch next ? rows only";
+    sql(sql).ok();
+  }
+
   @Test public void testOffsetFetch() {
     final String sql = "select empno from emp\n"
         + "offset 10 rows fetch next 5 rows only";
+    sql(sql).ok();
+  }
+
+  @Test public void testOffsetFetchWithDynamicParameter() {
+    final String sql = "select empno from emp\n"
+        + "offset ? rows fetch next ? rows only";
     sql(sql).ok();
   }
 
@@ -672,8 +692,18 @@ public class SqlToRelConverterTest extends SqlToRelTestBase {
     sql(sql).ok();
   }
 
+  @Test public void testOffsetWithDynamicParameter() {
+    final String sql = "select empno from emp offset ? rows";
+    sql(sql).ok();
+  }
+
   @Test public void testFetch() {
     final String sql = "select empno from emp fetch next 5 rows only";
+    sql(sql).ok();
+  }
+
+  @Test public void testFetchWithDynamicParameter() {
+    final String sql = "select empno from emp fetch next ? rows only";
     sql(sql).ok();
   }
 
@@ -1023,6 +1053,10 @@ public class SqlToRelConverterTest extends SqlToRelTestBase {
   @Test public void testUnnestSubQuery() {
     final String sql = "select*from unnest(multiset(select*from dept))";
     sql(sql).ok();
+  }
+
+  @Test public void testArrayOfRecord() {
+    sql("select employees[1].skills[2+3].desc from dept_nested").ok();
   }
 
   @Test public void testUnnestArray() {
@@ -1434,12 +1468,16 @@ public class SqlToRelConverterTest extends SqlToRelTestBase {
   }
 
   @Test public void testIsDistinctFrom() {
-    final String sql = "select 1 is distinct from 2 from (values(true))";
+    final String sql = "select empno is distinct from deptno\n"
+        + "from (values (cast(null as int), 1),\n"
+        + "             (2, cast(null as int))) as emp(empno, deptno)";
     sql(sql).ok();
   }
 
   @Test public void testIsNotDistinctFrom() {
-    final String sql = "select 1 is not distinct from 2 from (values(true))";
+    final String sql = "select empno is not distinct from deptno\n"
+        + "from (values (cast(null as int), 1),\n"
+        + "             (2, cast(null as int))) as emp(empno, deptno)";
     sql(sql).ok();
   }
 
@@ -1900,6 +1938,12 @@ public class SqlToRelConverterTest extends SqlToRelTestBase {
   @Test public void testUpdateBind() {
     final String sql = "update emp"
         + " set sal = sal + ? where slacker = false";
+    sql(sql).ok();
+  }
+
+  @Test public void testUpdateBind2() {
+    final String sql = "update emp"
+        + " set sal = ? where slacker = false";
     sql(sql).ok();
   }
 

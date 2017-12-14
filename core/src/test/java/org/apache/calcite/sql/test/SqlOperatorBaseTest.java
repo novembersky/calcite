@@ -26,7 +26,6 @@ import org.apache.calcite.sql.SqlAggFunction;
 import org.apache.calcite.sql.SqlCall;
 import org.apache.calcite.sql.SqlCallBinding;
 import org.apache.calcite.sql.SqlDataTypeSpec;
-import org.apache.calcite.sql.SqlDialect;
 import org.apache.calcite.sql.SqlIdentifier;
 import org.apache.calcite.sql.SqlJdbcFunctionCall;
 import org.apache.calcite.sql.SqlLiteral;
@@ -34,6 +33,8 @@ import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.SqlOperandCountRange;
 import org.apache.calcite.sql.SqlOperator;
+import org.apache.calcite.sql.dialect.AnsiSqlDialect;
+import org.apache.calcite.sql.dialect.CalciteSqlDialect;
 import org.apache.calcite.sql.fun.OracleSqlOperatorTable;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.parser.SqlParserPos;
@@ -1138,11 +1139,13 @@ public abstract class SqlOperatorBaseTest {
     tester.checkNull("cast(null as boolean)");
   }
 
-  @Ignore("[CALCITE-1439] Handling errors during constant reduction")
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-1439">[CALCITE-1439]
+   * Handling errors during constant reduction</a>. */
   @Test public void testCastInvalid() {
-    // Constant reduction kicks in and generates Java constants that throw
-    // when the class is loaded, thus ExceptionInInitializerError. We don't have
-    // a fix yet.
+    // Before CALCITE-1439 was fixed, constant reduction would kick in and
+    // generate Java constants that throw when the class is loaded, thus
+    // ExceptionInInitializerError.
     tester.checkScalarExact("cast('15' as integer)", "INTEGER NOT NULL", "15");
     tester.checkFails("cast('15.4' as integer)", "xxx", true);
     tester.checkFails("cast('15.6' as integer)", "xxx", true);
@@ -6202,6 +6205,51 @@ public abstract class SqlOperatorBaseTest {
     tester.checkAgg("COUNT(DISTINCT 123)", stringValues, 1, (double) 0);
   }
 
+  @Test public void testApproxCountDistinctFunc() {
+    tester.setFor(SqlStdOperatorTable.COUNT, VM_EXPAND);
+    tester.checkFails("approx_count_distinct(^*^)", "Unknown identifier '\\*'",
+        false);
+    tester.checkType("approx_count_distinct('name')", "BIGINT NOT NULL");
+    tester.checkType("approx_count_distinct(1)", "BIGINT NOT NULL");
+    tester.checkType("approx_count_distinct(1.2)", "BIGINT NOT NULL");
+    tester.checkType("APPROX_COUNT_DISTINCT(DISTINCT 'x')", "BIGINT NOT NULL");
+    tester.checkFails("^APPROX_COUNT_DISTINCT()^",
+        "Invalid number of arguments to function 'APPROX_COUNT_DISTINCT'. "
+            + "Was expecting 1 arguments",
+        false);
+    tester.checkType("approx_count_distinct(1, 2)", "BIGINT NOT NULL");
+    tester.checkType("approx_count_distinct(1, 2, 'x', 'y')",
+        "BIGINT NOT NULL");
+    final String[] values = {"0", "CAST(null AS INTEGER)", "1", "0"};
+    // currently APPROX_COUNT_DISTINCT(x) returns the same as COUNT(DISTINCT x)
+    tester.checkAgg(
+        "APPROX_COUNT_DISTINCT(x)",
+        values,
+        2,
+        (double) 0);
+    tester.checkAgg(
+        "APPROX_COUNT_DISTINCT(CASE x WHEN 0 THEN NULL ELSE -1 END)",
+        values,
+        1,
+        (double) 0);
+    // DISTINCT keyword is allowed but has no effect
+    tester.checkAgg(
+        "APPROX_COUNT_DISTINCT(DISTINCT x)",
+        values,
+        2,
+        (double) 0);
+
+    // string values -- note that empty string is not null
+    final String[] stringValues = {
+        "'a'", "CAST(NULL AS VARCHAR(1))", "''"
+    };
+    tester.checkAgg("APPROX_COUNT_DISTINCT(x)", stringValues, 2, (double) 0);
+    tester.checkAgg("APPROX_COUNT_DISTINCT(DISTINCT x)", stringValues, 2,
+        (double) 0);
+    tester.checkAgg("APPROX_COUNT_DISTINCT(DISTINCT 123)", stringValues, 1,
+        (double) 0);
+  }
+
   @Test public void testSumFunc() {
     tester.setFor(SqlStdOperatorTable.SUM, VM_EXPAND);
     tester.checkFails(
@@ -6733,7 +6781,7 @@ public abstract class SqlOperatorBaseTest {
         SqlLiteral literal =
             type.getSqlTypeName().createLiteral(o, SqlParserPos.ZERO);
         SqlString literalString =
-            literal.toSqlString(SqlDialect.DUMMY);
+            literal.toSqlString(AnsiSqlDialect.DEFAULT);
         final String expr =
             "CAST(" + literalString
                 + " AS " + type + ")";
@@ -6783,7 +6831,7 @@ public abstract class SqlOperatorBaseTest {
         SqlLiteral literal =
             type.getSqlTypeName().createLiteral(o, SqlParserPos.ZERO);
         SqlString literalString =
-            literal.toSqlString(SqlDialect.DUMMY);
+            literal.toSqlString(AnsiSqlDialect.DEFAULT);
 
         if ((type.getSqlTypeName() == SqlTypeName.BIGINT)
             || ((type.getSqlTypeName() == SqlTypeName.DECIMAL)
@@ -6900,7 +6948,7 @@ public abstract class SqlOperatorBaseTest {
             continue;
           }
           final SqlPrettyWriter writer =
-              new SqlPrettyWriter(SqlDialect.CALCITE);
+              new SqlPrettyWriter(CalciteSqlDialect.DEFAULT);
           op.unparse(writer, call, 0, 0);
           final String s = writer.toSqlString().toString();
           if (s.startsWith("OVERLAY(")

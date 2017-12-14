@@ -46,6 +46,7 @@ import org.apache.calcite.rel.core.RelFactories;
 import org.apache.calcite.rel.core.Sample;
 import org.apache.calcite.rel.core.Sort;
 import org.apache.calcite.rel.core.Uncollect;
+import org.apache.calcite.rel.core.Values;
 import org.apache.calcite.rel.logical.LogicalAggregate;
 import org.apache.calcite.rel.logical.LogicalCorrelate;
 import org.apache.calcite.rel.logical.LogicalFilter;
@@ -84,6 +85,7 @@ import org.apache.calcite.rex.RexShuttle;
 import org.apache.calcite.rex.RexSubQuery;
 import org.apache.calcite.rex.RexUtil;
 import org.apache.calcite.rex.RexWindowBound;
+import org.apache.calcite.schema.ColumnStrategy;
 import org.apache.calcite.schema.ModifiableTable;
 import org.apache.calcite.schema.ModifiableView;
 import org.apache.calcite.schema.Table;
@@ -169,6 +171,7 @@ import org.apache.calcite.util.trace.CalciteTrace;
 
 import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
+import com.google.common.base.Supplier;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableList.Builder;
 import com.google.common.collect.ImmutableMap;
@@ -197,7 +200,6 @@ import java.util.Set;
 import java.util.TreeSet;
 
 import static org.apache.calcite.sql.SqlUtil.stripAs;
-import static org.apache.calcite.util.Static.RESOURCE;
 
 /**
  * Converts a SQL parse tree (consisting of
@@ -797,7 +799,8 @@ public class SqlToRelConverter {
         || select.getOrderList().getList().isEmpty()) {
       assert collation.getFieldCollations().isEmpty();
       if ((offset == null
-            || ((SqlLiteral) offset).bigDecimalValue().equals(BigDecimal.ZERO))
+            || (offset instanceof SqlLiteral
+                && ((SqlLiteral) offset).bigDecimalValue().equals(BigDecimal.ZERO)))
           && fetch == null) {
         return;
       }
@@ -1100,9 +1103,9 @@ public class SqlToRelConverter {
             LogicalAggregate.create(seek, ImmutableBitSet.of(), null,
                 ImmutableList.of(
                     AggregateCall.create(SqlStdOperatorTable.COUNT, false,
-                        ImmutableList.<Integer>of(), -1, longType, null),
+                        false, ImmutableList.<Integer>of(), -1, longType, null),
                     AggregateCall.create(SqlStdOperatorTable.COUNT, false,
-                        args, -1, longType, null)));
+                        false, args, -1, longType, null)));
         LogicalJoin join =
             LogicalJoin.create(bb.root, aggregate, rexBuilder.makeLiteral(true),
                 ImmutableSet.<CorrelationId>of(), JoinRelType.INNER);
@@ -1931,7 +1934,16 @@ public class SqlToRelConverter {
       return;
 
     case AS:
-      convertFrom(bb, ((SqlCall) from).operand(0));
+      call = (SqlCall) from;
+      convertFrom(bb, call.operand(0));
+      if (call.operandCount() > 2
+          && bb.root instanceof Values) {
+        final List<String> fieldNames = new ArrayList<>();
+        for (SqlNode node : Util.skip(call.getOperandList(), 2)) {
+          fieldNames.add(((SqlIdentifier) node).getSimple());
+        }
+        bb.setRoot(relBuilder.push(bb.root).rename(fieldNames).build(), true);
+      }
       return;
 
     case WITH_ITEM:
@@ -2239,7 +2251,7 @@ public class SqlToRelConverter {
     final RelFactories.MatchFactory factory =
         RelFactories.DEFAULT_MATCH_FACTORY;
     final RelNode rel =
-        factory.createMatchRecognize(input, patternNode,
+        factory.createMatch(input, patternNode,
             rowType, matchRecognize.getStrictStart().booleanValue(),
             matchRecognize.getStrictEnd().booleanValue(),
             definitionNodes.build(), measureNodes.build(), after,
@@ -2287,7 +2299,8 @@ public class SqlToRelConverter {
       SqlCall call) {
     final SqlOperator operator = call.getOperator();
     if (operator == SqlStdOperatorTable.TABLESAMPLE) {
-      final String sampleName = (String) SqlLiteral.value(call.operand(0));
+      final String sampleName =
+          SqlLiteral.unchain(call.operand(0)).getValueAs(String.class);
       datasetStack.push(sampleName);
       SqlCall cursorCall = call.operand(1);
       SqlNode query = cursorCall.operand(0);
@@ -2681,6 +2694,10 @@ public class SqlToRelConverter {
     // first replace the sub-queries inside the aggregates
     // because they will provide input rows to the aggregates.
     replaceSubQueries(bb, aggregateFinder.list,
+        RelOptUtil.Logic.TRUE_FALSE_UNKNOWN);
+
+    // also replace sub-queries inside filters in the aggregates
+    replaceSubQueries(bb, aggregateFinder.filterList,
         RelOptUtil.Logic.TRUE_FALSE_UNKNOWN);
 
     // If group-by clause is missing, pretend that it has zero elements.
@@ -3095,7 +3112,8 @@ public class SqlToRelConverter {
   private RelNode createModify(RelOptTable targetTable, RelNode source) {
     final ModifiableTable modifiableTable =
         targetTable.unwrap(ModifiableTable.class);
-    if (modifiableTable != null) {
+    if (modifiableTable != null
+        && modifiableTable == targetTable.unwrap(Table.class)) {
       return modifiableTable.toModificationRel(cluster, targetTable,
           catalogReader, source, LogicalTableModify.Operation.INSERT, null,
           null, false);
@@ -3184,8 +3202,44 @@ public class SqlToRelConverter {
     };
   }
 
-  public RelNode toRel(RelOptTable table) {
-    return table.toRel(createToRelContext());
+  public RelNode toRel(final RelOptTable table) {
+    final RelNode scan = table.toRel(createToRelContext());
+
+    final InitializerExpressionFactory ief =
+        Util.first(table.unwrap(InitializerExpressionFactory.class),
+            NullInitializerExpressionFactory.INSTANCE);
+
+    // Lazily create a blackboard that contains all non-generated columns.
+    final Supplier<Blackboard> bb = new Supplier<Blackboard>() {
+      public Blackboard get() {
+        RexNode sourceRef = rexBuilder.makeRangeReference(scan);
+        return createInsertBlackboard(table, sourceRef,
+            table.getRowType().getFieldNames());
+      }
+    };
+
+    int virtualCount = 0;
+    final List<RexNode> list = new ArrayList<>();
+    for (RelDataTypeField f : table.getRowType().getFieldList()) {
+      final ColumnStrategy strategy =
+          ief.generationStrategy(table, f.getIndex());
+      switch (strategy) {
+      case VIRTUAL:
+        list.add(ief.newColumnDefaultValue(table, f.getIndex(), bb.get()));
+        ++virtualCount;
+        break;
+      default:
+        list.add(
+            rexBuilder.makeInputRef(scan,
+                RelOptTableImpl.realOrdinal(table, f.getIndex())));
+      }
+    }
+    if (virtualCount > 0) {
+      relBuilder.push(scan);
+      relBuilder.project(list);
+      return relBuilder.build();
+    }
+    return scan;
   }
 
   protected RelOptTable getTargetTable(SqlNode call) {
@@ -3211,13 +3265,11 @@ public class SqlToRelConverter {
    * default values and the source expressions provided.
    *
    * @param call      Insert expression
-   * @param sourceRel Source relational expression
+   * @param source Source relational expression
    * @return Converted INSERT statement
    */
-  protected RelNode convertColumnList(
-      SqlInsert call,
-      RelNode sourceRel) {
-    RelDataType sourceRowType = sourceRel.getRowType();
+  protected RelNode convertColumnList(final SqlInsert call, RelNode source) {
+    RelDataType sourceRowType = source.getRowType();
     final RexNode sourceRef =
         rexBuilder.makeRangeReference(sourceRowType, 0, false);
     final List<String> targetColumnNames = new ArrayList<>();
@@ -3225,9 +3277,8 @@ public class SqlToRelConverter {
     collectInsertTargets(call, sourceRef, targetColumnNames, columnExprs);
 
     final RelOptTable targetTable = getTargetTable(call);
-    final RelDataType targetRowType = targetTable.getRowType();
-    final List<RelDataTypeField> targetFields =
-        targetRowType.getFieldList();
+    final RelDataType targetRowType = RelOptTableImpl.realRowType(targetTable);
+    final List<RelDataTypeField> targetFields = targetRowType.getFieldList();
     final List<RexNode> sourceExps =
         new ArrayList<>(
             Collections.<RexNode>nCopies(targetFields.size(), null));
@@ -3249,32 +3300,56 @@ public class SqlToRelConverter {
       sourceExps.set(field.getIndex(), p.right);
     }
 
+    // Lazily create a blackboard that contains all non-generated columns.
+    final Supplier<Blackboard> bb = new Supplier<Blackboard>() {
+      public Blackboard get() {
+        return createInsertBlackboard(targetTable, sourceRef,
+            targetColumnNames);
+      }
+    };
+
     // Walk the expression list and get default values for any columns
     // that were not supplied in the statement. Get field names too.
     for (int i = 0; i < targetFields.size(); ++i) {
       final RelDataTypeField field = targetFields.get(i);
       final String fieldName = field.getName();
       fieldNames.set(i, fieldName);
-      if (sourceExps.get(i) != null) {
-        if (initializerFactory.isGeneratedAlways(targetTable, i)) {
-          throw RESOURCE.insertIntoAlwaysGenerated(fieldName).ex();
-        }
-        continue;
-      }
-      sourceExps.set(i,
-          initializerFactory.newColumnDefaultValue(targetTable, i,
-              new InitializerContext() {
-                public RexBuilder getRexBuilder() {
-                  return rexBuilder;
-                }
-              }));
+      if (sourceExps.get(i) == null
+          || sourceExps.get(i).getKind() == SqlKind.DEFAULT) {
+        sourceExps.set(i,
+            initializerFactory.newColumnDefaultValue(targetTable, i, bb.get()));
 
-      // bare nulls are dangerous in the wrong hands
-      sourceExps.set(i,
-          castNullLiteralIfNeeded(sourceExps.get(i), field.getType()));
+        // bare nulls are dangerous in the wrong hands
+        sourceExps.set(i,
+            castNullLiteralIfNeeded(sourceExps.get(i), field.getType()));
+      }
     }
 
-    return RelOptUtil.createProject(sourceRel, sourceExps, fieldNames, true);
+    return RelOptUtil.createProject(source, sourceExps, fieldNames, true);
+  }
+
+  /** Creates a blackboard for translating the expressions of generated columns
+   * in an INSERT statement. */
+  private Blackboard createInsertBlackboard(RelOptTable targetTable,
+      RexNode sourceRef, List<String> targetColumnNames) {
+    final Map<String, RexNode> nameToNodeMap = new HashMap<>();
+    int j = 0;
+
+    // Assign expressions for non-generated columns.
+    final List<ColumnStrategy> strategies = targetTable.getColumnStrategies();
+    final List<String> targetFields = targetTable.getRowType().getFieldNames();
+    for (String targetColumnName : targetColumnNames) {
+      final int i = targetFields.indexOf(targetColumnName);
+      switch (strategies.get(i)) {
+      case STORED:
+      case VIRTUAL:
+        break;
+      default:
+        nameToNodeMap.put(targetColumnName,
+            rexBuilder.makeFieldAccess(sourceRef, j++));
+      }
+    }
+    return createBlackboard(null, nameToNodeMap, false);
   }
 
   private InitializerExpressionFactory getInitializerFactory(
@@ -3288,7 +3363,7 @@ public class SqlToRelConverter {
         return f;
       }
     }
-    return new NullInitializerExpressionFactory();
+    return NullInitializerExpressionFactory.INSTANCE;
   }
 
   private static <T> T unwrap(Object o, Class<T> clazz) {
@@ -3344,9 +3419,37 @@ public class SqlToRelConverter {
       }
     }
 
-    for (int i = 0; i < targetColumnNames.size(); i++) {
-      final RexNode expr = rexBuilder.makeFieldAccess(sourceRef, i);
+    final Blackboard bb =
+        createInsertBlackboard(targetTable, sourceRef, targetColumnNames);
+
+    // Next, assign expressions for generated columns.
+    final List<ColumnStrategy> strategies = targetTable.getColumnStrategies();
+    for (String columnName : targetColumnNames) {
+      final int i = tableRowType.getFieldNames().indexOf(columnName);
+      final RexNode expr;
+      switch (strategies.get(i)) {
+      case STORED:
+        final InitializerExpressionFactory f =
+            Util.first(targetTable.unwrap(InitializerExpressionFactory.class),
+                NullInitializerExpressionFactory.INSTANCE);
+        expr = f.newColumnDefaultValue(targetTable, i, bb);
+        break;
+      case VIRTUAL:
+        expr = null;
+        break;
+      default:
+        expr = bb.nameToNodeMap.get(columnName);
+      }
       columnExprs.add(expr);
+    }
+
+    // Remove virtual columns from the list.
+    for (int i = 0; i < targetColumnNames.size(); i++) {
+      if (columnExprs.get(i) == null) {
+        columnExprs.remove(i);
+        targetColumnNames.remove(i);
+        --i;
+      }
     }
   }
 
@@ -3875,7 +3978,8 @@ public class SqlToRelConverter {
   /**
    * Workspace for translating an individual SELECT statement (or sub-SELECT).
    */
-  protected class Blackboard implements SqlRexContext, SqlVisitor<RexNode> {
+  protected class Blackboard implements SqlRexContext, SqlVisitor<RexNode>,
+      InitializerContext {
     /**
      * Collection of {@link RelNode} objects which correspond to a SELECT
      * statement.
@@ -4216,6 +4320,9 @@ public class SqlToRelConverter {
     }
 
     RelDataTypeField getRootField(RexInputRef inputRef) {
+      if (inputs == null) {
+        return null;
+      }
       int fieldOffset = inputRef.getIndex();
       for (RelNode input : inputs) {
         RelDataType rowType = input.getRowType();
@@ -4795,7 +4902,18 @@ public class SqlToRelConverter {
       // operator). However, do not ignore nested window aggregates.
       if (call.getOperator().getKind() == SqlKind.OVER) {
         // Track aggregate nesting levels only within an OVER operator.
+        List<SqlNode> operandList = call.getOperandList();
+        assert operandList.size() == 2;
+
+        // Ignore the top level window aggregates and ranking functions
+        // positioned as the first operand of a OVER operator
         inOver = true;
+        operandList.get(0).accept(this);
+
+        // Normal translation for the second operand of a OVER operator
+        inOver = false;
+        operandList.get(1).accept(this);
+        return null;
       }
 
       // Do not translate the top level window aggregate. Only do so for
@@ -4865,19 +4983,26 @@ public class SqlToRelConverter {
         bb.agg = this;
       }
 
-      final SqlAggFunction aggFunction =
+      SqlAggFunction aggFunction =
           (SqlAggFunction) call.getOperator();
-      RelDataType type = validator.deriveType(bb.scope, call);
+      final RelDataType type = validator.deriveType(bb.scope, call);
       boolean distinct = false;
       SqlLiteral quantifier = call.getFunctionQuantifier();
       if ((null != quantifier)
           && (quantifier.getValue() == SqlSelectKeyword.DISTINCT)) {
         distinct = true;
       }
+      boolean approximate = false;
+      if (aggFunction == SqlStdOperatorTable.APPROX_COUNT_DISTINCT) {
+        aggFunction = SqlStdOperatorTable.COUNT;
+        distinct = true;
+        approximate = true;
+      }
       final AggregateCall aggCall =
           AggregateCall.create(
               aggFunction,
               distinct,
+              approximate,
               args,
               filterArg,
               type,
@@ -5204,12 +5329,24 @@ public class SqlToRelConverter {
    */
   private static class AggregateFinder extends SqlBasicVisitor<Void> {
     final SqlNodeList list = new SqlNodeList(SqlParserPos.ZERO);
+    final SqlNodeList filterList = new SqlNodeList(SqlParserPos.ZERO);
 
     @Override public Void visit(SqlCall call) {
       // ignore window aggregates and ranking functions (associated with OVER operator)
       if (call.getOperator().getKind() == SqlKind.OVER) {
         return null;
       }
+
+      if (call.getOperator().getKind() == SqlKind.FILTER) {
+        // the WHERE in a FILTER must be tracked too so we can call replaceSubQueries on it.
+        // see https://issues.apache.org/jira/browse/CALCITE-1910
+        final SqlNode aggCall = call.getOperandList().get(0);
+        final SqlNode whereCall = call.getOperandList().get(1);
+        list.add(aggCall);
+        filterList.add(whereCall);
+        return null;
+      }
+
       if (call.getOperator().isAggregator()) {
         list.add(call);
         return null;

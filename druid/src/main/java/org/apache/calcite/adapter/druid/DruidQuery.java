@@ -73,6 +73,8 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
 
+import org.joda.time.Interval;
+
 import java.io.IOException;
 import java.io.StringWriter;
 import java.math.BigDecimal;
@@ -95,7 +97,7 @@ public class DruidQuery extends AbstractRelNode implements BindableRel {
 
   final RelOptTable table;
   final DruidTable druidTable;
-  final ImmutableList<LocalInterval> intervals;
+  final ImmutableList<Interval> intervals;
   final ImmutableList<RelNode> rels;
 
   private static final Pattern VALID_SIG = Pattern.compile("sf?p?(a?|ao)l?");
@@ -115,7 +117,7 @@ public class DruidQuery extends AbstractRelNode implements BindableRel {
    */
   protected DruidQuery(RelOptCluster cluster, RelTraitSet traitSet,
       RelOptTable table, DruidTable druidTable,
-      List<LocalInterval> intervals, List<RelNode> rels) {
+      List<Interval> intervals, List<RelNode> rels) {
     super(cluster, traitSet);
     this.table = table;
     this.druidTable = druidTable;
@@ -224,10 +226,12 @@ public class DruidQuery extends AbstractRelNode implements BindableRel {
     case AND:
     case OR:
     case NOT:
+    case IN:
+    case IS_NULL:
+    case IS_NOT_NULL:
+      return areValidFilters(((RexCall) e).getOperands(), false, input);
     case EQUALS:
     case NOT_EQUALS:
-    case IN:
-      return areValidFilters(((RexCall) e).getOperands(), false, input);
     case LESS_THAN:
     case LESS_THAN_OR_EQUAL:
     case GREATER_THAN:
@@ -290,7 +294,7 @@ public class DruidQuery extends AbstractRelNode implements BindableRel {
 
   /** Creates a DruidQuery. */
   private static DruidQuery create(RelOptCluster cluster, RelTraitSet traitSet,
-      RelOptTable table, DruidTable druidTable, List<LocalInterval> intervals,
+      RelOptTable table, DruidTable druidTable, List<Interval> intervals,
       List<RelNode> rels) {
     return new DruidQuery(cluster, traitSet, table, druidTable, intervals, rels);
   }
@@ -305,7 +309,7 @@ public class DruidQuery extends AbstractRelNode implements BindableRel {
 
   /** Extends a DruidQuery. */
   public static DruidQuery extendQuery(DruidQuery query,
-      List<LocalInterval> intervals) {
+      List<Interval> intervals) {
     return DruidQuery.create(query.getCluster(), query.getTraitSet(), query.getTable(),
         query.druidTable, intervals, query.rels);
   }
@@ -858,7 +862,7 @@ public class DruidQuery extends AbstractRelNode implements BindableRel {
     switch (aggCall.getAggregation().getKind()) {
     case COUNT:
       if (aggCall.isDistinct()) {
-        if (config.approximateDistinctCount()) {
+        if (aggCall.isApproximate() || config.approximateDistinctCount()) {
           if (complexMetric == null) {
             aggregation = new JsonCardinalityAggregation("cardinality", name, list);
           } else {
@@ -997,7 +1001,7 @@ public class DruidQuery extends AbstractRelNode implements BindableRel {
     if (o instanceof String) {
       String s = (String) o;
       generator.writeString(s);
-    } else if (o instanceof LocalInterval) {
+    } else if (o instanceof Interval) {
       generator.writeString(o.toString());
     } else if (o instanceof Integer) {
       Integer i = (Integer) o;
@@ -1013,7 +1017,7 @@ public class DruidQuery extends AbstractRelNode implements BindableRel {
 
   /** Generates a JSON string to query metadata about a data source. */
   static String metadataQuery(String dataSourceName,
-      List<LocalInterval> intervals) {
+      List<Interval> intervals) {
     final StringWriter sw = new StringWriter();
     final JsonFactory factory = new JsonFactory();
     try {
@@ -1151,10 +1155,15 @@ public class DruidQuery extends AbstractRelNode implements BindableRel {
       case LESS_THAN_OR_EQUAL:
       case IN:
       case BETWEEN:
+      case IS_NULL:
+      case IS_NOT_NULL:
         call = (RexCall) e;
         int posRef;
         int posConstant;
-        if (RexUtil.isConstant(call.getOperands().get(1))) {
+        if (call.getOperands().size() == 1) { // IS NULL and IS NOT NULL
+          posRef = 0;
+          posConstant = -1;
+        } else if (RexUtil.isConstant(call.getOperands().get(1))) {
           posRef = 0;
           posConstant = 1;
         } else if (RexUtil.isConstant(call.getOperands().get(0))) {
@@ -1182,8 +1191,27 @@ public class DruidQuery extends AbstractRelNode implements BindableRel {
 
         switch (e.getKind()) {
         case EQUALS:
+          // extractionFunction should be null because if we are using an extraction function
+          // we have guarantees about the format of the output and thus we can apply the
+          // normal selector
+          if (numeric && extractionFunction == null) {
+            String constantValue = tr(e, posConstant);
+            return new JsonBound(dimName, constantValue, false, constantValue, false,
+                numeric, extractionFunction);
+          }
           return new JsonSelector(dimName, tr(e, posConstant), extractionFunction);
         case NOT_EQUALS:
+          // extractionFunction should be null because if we are using an extraction function
+          // we have guarantees about the format of the output and thus we can apply the
+          // normal selector
+          if (numeric && extractionFunction == null) {
+            String constantValue = tr(e, posConstant);
+            return new JsonCompositeFilter(JsonFilter.Type.OR,
+                new JsonBound(dimName, constantValue, true, null, false,
+                    numeric, extractionFunction),
+                new JsonBound(dimName, null, false, constantValue, true,
+                    numeric, extractionFunction));
+          }
           return new JsonCompositeFilter(JsonFilter.Type.NOT,
               new JsonSelector(dimName, tr(e, posConstant), extractionFunction));
         case GREATER_THAN:
@@ -1209,6 +1237,11 @@ public class DruidQuery extends AbstractRelNode implements BindableRel {
         case BETWEEN:
           return new JsonBound(dimName, tr(e, 2), false,
               tr(e, 3), false, numeric, extractionFunction);
+        case IS_NULL:
+          return new JsonSelector(dimName, null, extractionFunction);
+        case IS_NOT_NULL:
+          return new JsonCompositeFilter(JsonFilter.Type.NOT,
+              new JsonSelector(dimName, null, extractionFunction));
         default:
           throw new AssertionError();
         }

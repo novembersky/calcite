@@ -765,17 +765,12 @@ public class CalcitePrepareImpl implements CalcitePrepare {
       if (sqlNode.getKind().belongsTo(SqlKind.DDL)) {
         executeDdl(context, sqlNode);
 
-        // Return a dummy signature that contains no rows
-        final Bindable<T> bindable = new Bindable<T>() {
-          public Enumerable<T> bind(DataContext dataContext) {
-            return Linq4j.emptyEnumerable();
-          }
-        };
         return new CalciteSignature<>(query.sql,
             ImmutableList.<AvaticaParameter>of(),
             ImmutableMap.<String, Object>of(), null,
             ImmutableList.<ColumnMetaData>of(), Meta.CursorFactory.OBJECT,
-            null, ImmutableList.<RelCollation>of(), -1, bindable);
+            null, ImmutableList.<RelCollation>of(), -1, null,
+            Meta.StatementType.OTHER_DDL);
       }
 
       final SqlValidator validator =
@@ -1120,7 +1115,6 @@ public class CalcitePrepareImpl implements CalcitePrepare {
 
     private PreparedResult prepare_(Supplier<RelNode> fn,
         RelDataType resultType) {
-      queryString = null;
       Class runtimeContextClass = Object.class;
       init(runtimeContextClass);
 

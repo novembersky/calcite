@@ -100,6 +100,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.LinkedListMultimap;
 import com.google.common.collect.Multimap;
 
+import org.hamcrest.Matcher;
 import org.hsqldb.jdbcDriver;
 
 import org.junit.Ignore;
@@ -116,12 +117,14 @@ import java.sql.DatabaseMetaData;
 import java.sql.Date;
 import java.sql.DriverManager;
 import java.sql.DriverPropertyInfo;
+import java.sql.ParameterMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
@@ -730,7 +733,7 @@ public class JdbcTest {
              driver.connect("jdbc:calcite:", new Properties());
         Statement statement = connection.createStatement()) {
       assertThat(driver.counter, is(0));
-      statement.executeQuery("COMMIT");
+      statement.executeUpdate("COMMIT");
       assertThat(driver.counter, is(1));
     }
   }
@@ -1516,6 +1519,30 @@ public class JdbcTest {
             });
   }
 
+  @Test public void testExtractMonthFromTimestamp() {
+    CalciteAssert.that()
+        .with(CalciteAssert.Config.JDBC_FOODMART)
+        .query("select extract(month from \"birth_date\") as c \n"
+            + "from \"foodmart\".\"employee\" where \"employee_id\"=1")
+        .returns("C=8\n");
+  }
+
+  @Test public void testExtractYearFromTimestamp() {
+    CalciteAssert.that()
+        .with(CalciteAssert.Config.JDBC_FOODMART)
+        .query("select extract(year from \"birth_date\") as c \n"
+            + "from \"foodmart\".\"employee\" where \"employee_id\"=1")
+        .returns("C=1961\n");
+  }
+
+  @Test public void testExtractFromInterval() {
+    CalciteAssert.that()
+        .with(CalciteAssert.Config.JDBC_FOODMART)
+        .query("select extract(month from interval '2-3' year to month) as c \n"
+            + "from \"foodmart\".\"employee\" where \"employee_id\"=1")
+        .returns("C=3\n");
+  }
+
   @Test public void testFloorDate() {
     CalciteAssert.that()
         .with(CalciteAssert.Config.JDBC_FOODMART)
@@ -1563,6 +1590,34 @@ public class JdbcTest {
         .returns("full_name=James Aguilar\n"
             + "full_name=Carol Amyotte\n"
             + "full_name=Terry Anderson\n");
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-2029">[CALCITE-2029]
+   * Query with "is distinct from" condition in where or join clause fails
+   * with AssertionError: Cast for just nullability not allowed</a>. */
+  @Test public void testIsNotDistinctInFilter() {
+    CalciteAssert.that()
+      .with(CalciteAssert.Config.JDBC_FOODMART)
+      .query("select *\n"
+          + "  from \"foodmart\".\"employee\" as e1\n"
+          + "  where e1.\"last_name\" is distinct from e1.\"last_name\"")
+      .runs();
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-2029">[CALCITE-2029]
+   * Query with "is distinct from" condition in where or join clause fails
+   * with AssertionError: Cast for just nullability not allowed</a>. */
+  @Test public void testMixedEqualAndIsNotDistinctJoin() {
+    CalciteAssert.that()
+      .with(CalciteAssert.Config.JDBC_FOODMART)
+      .query("select *\n"
+          + "  from \"foodmart\".\"employee\" as e1\n"
+          + "  join \"foodmart\".\"employee\" as e2 on\n"
+          + "  e1.\"first_name\" = e1.\"first_name\"\n"
+          + "  and e1.\"last_name\" is distinct from e2.\"last_name\"")
+      .runs();
   }
 
   /** A join that has both equi and non-equi conditions.
@@ -2829,11 +2884,26 @@ public class JdbcTest {
             + "customer_id=1; postal_code=15057\n");
   }
 
+  /** Tests ORDER BY with all combinations of ASC, DESC, NULLS FIRST,
+   * NULLS LAST. */
+  @Test public void testOrderByNulls() {
+    checkOrderByNulls(CalciteAssert.Config.FOODMART_CLONE);
+    checkOrderByNulls(CalciteAssert.Config.JDBC_FOODMART);
+  }
+
+  private void checkOrderByNulls(CalciteAssert.Config clone) {
+    checkOrderByDescNullsFirst(clone);
+    checkOrderByNullsFirst(clone);
+    checkOrderByDescNullsLast(clone);
+    checkOrderByNullsLast(clone);
+  }
+
   /** Tests ORDER BY ... DESC NULLS FIRST. */
-  @Test public void testOrderByDescNullsFirst() {
+  private void checkOrderByDescNullsFirst(CalciteAssert.Config config) {
     CalciteAssert.that()
-        .with(CalciteAssert.Config.FOODMART_CLONE)
-        .query("select \"store_id\", \"grocery_sqft\" from \"store\"\n"
+        .with(config)
+        .query("select \"store_id\", \"grocery_sqft\"\n"
+            + "from \"foodmart\".\"store\"\n"
             + "where \"store_id\" < 3 order by 2 desc nulls first")
         .returns("store_id=0; grocery_sqft=null\n"
             + "store_id=2; grocery_sqft=22271\n"
@@ -2841,10 +2911,11 @@ public class JdbcTest {
   }
 
   /** Tests ORDER BY ... NULLS FIRST. */
-  @Test public void testOrderByNullsFirst() {
+  private void checkOrderByNullsFirst(CalciteAssert.Config config) {
     CalciteAssert.that()
-        .with(CalciteAssert.Config.FOODMART_CLONE)
-        .query("select \"store_id\", \"grocery_sqft\" from \"store\"\n"
+        .with(config)
+        .query("select \"store_id\", \"grocery_sqft\"\n"
+            + "from \"foodmart\".\"store\"\n"
             + "where \"store_id\" < 3 order by 2 nulls first")
         .returns("store_id=0; grocery_sqft=null\n"
             + "store_id=1; grocery_sqft=17475\n"
@@ -2852,10 +2923,11 @@ public class JdbcTest {
   }
 
   /** Tests ORDER BY ... DESC NULLS LAST. */
-  @Test public void testOrderByDescNullsLast() {
+  private void checkOrderByDescNullsLast(CalciteAssert.Config config) {
     CalciteAssert.that()
-        .with(CalciteAssert.Config.FOODMART_CLONE)
-        .query("select \"store_id\", \"grocery_sqft\" from \"store\"\n"
+        .with(config)
+        .query("select \"store_id\", \"grocery_sqft\"\n"
+            + "from \"foodmart\".\"store\"\n"
             + "where \"store_id\" < 3 order by 2 desc nulls last")
         .returns("store_id=2; grocery_sqft=22271\n"
             + "store_id=1; grocery_sqft=17475\n"
@@ -2863,10 +2935,11 @@ public class JdbcTest {
   }
 
   /** Tests ORDER BY ... NULLS LAST. */
-  @Test public void testOrderByNullsLast() {
+  private void checkOrderByNullsLast(CalciteAssert.Config config) {
     CalciteAssert.that()
-        .with(CalciteAssert.Config.FOODMART_CLONE)
-        .query("select \"store_id\", \"grocery_sqft\" from \"store\"\n"
+        .with(config)
+        .query("select \"store_id\", \"grocery_sqft\"\n"
+            + "from \"foodmart\".\"store\"\n"
             + "where \"store_id\" < 3 order by 2 nulls last")
         .returns("store_id=1; grocery_sqft=17475\n"
             + "store_id=2; grocery_sqft=22271\n"
@@ -4708,7 +4781,7 @@ public class JdbcTest {
         .query("select * from \"metadata\".TABLES")
         .returns(
             CalciteAssert.checkResultContains(
-                "tableSchem=metadata; tableName=COLUMNS; tableType=SYSTEM_TABLE; "));
+                "tableSchem=metadata; tableName=COLUMNS; tableType=SYSTEM TABLE; "));
 
     CalciteAssert.that()
         .with(CalciteAssert.Config.REGULAR_PLUS_METADATA)
@@ -4812,6 +4885,44 @@ public class JdbcTest {
                   preparedStatement2.close();
                   preparedStatement.close();
                   return null;
+                } catch (SQLException e) {
+                  throw new RuntimeException(e);
+                }
+              }
+            });
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-2061">[CALCITE-2061]
+   * Dynamic parameters in offset/fetch</a>. */
+  @Test public void testPreparedOffsetFetch() throws Exception {
+    checkPreparedOffsetFetch(0, 0, Matchers.returnsUnordered());
+    checkPreparedOffsetFetch(100, 4, Matchers.returnsUnordered());
+    checkPreparedOffsetFetch(3, 4,
+        Matchers.returnsUnordered("name=Eric"));
+  }
+
+  private void checkPreparedOffsetFetch(final int offset, final int fetch,
+      final Matcher<? super ResultSet> matcher) throws Exception {
+    CalciteAssert.hr()
+        .doWithConnection(
+            new Function<CalciteConnection, Object>() {
+              public Object apply(CalciteConnection connection) {
+                final String sql = "select \"name\"\n"
+                    + "from \"hr\".\"emps\"\n"
+                    + "order by \"empid\" offset ? fetch next ? rows only";
+                try (final PreparedStatement p =
+                         connection.prepareStatement(sql)) {
+                  final ParameterMetaData pmd = p.getParameterMetaData();
+                  assertThat(pmd.getParameterCount(), is(2));
+                  assertThat(pmd.getParameterType(1), is(Types.INTEGER));
+                  assertThat(pmd.getParameterType(2), is(Types.INTEGER));
+                  p.setInt(1, offset);
+                  p.setInt(2, fetch);
+                  try (final ResultSet r = p.executeQuery()) {
+                    assertThat(r, matcher);
+                    return null;
+                  }
                 } catch (SQLException e) {
                   throw new RuntimeException(e);
                 }
@@ -5208,6 +5319,17 @@ public class JdbcTest {
                   CalciteAssert.toString(
                       metaData.getTables(null, "adhoc", null, null)));
 
+              // including system tables; note that table type is "SYSTEM TABLE"
+              // not "SYSTEM_TABLE"
+              assertEquals(
+                  "TABLE_CAT=null; TABLE_SCHEM=adhoc; TABLE_NAME=EMPLOYEES; TABLE_TYPE=TABLE; REMARKS=null; TYPE_CAT=null; TYPE_SCHEM=null; TYPE_NAME=null; SELF_REFERENCING_COL_NAME=null; REF_GENERATION=null\n"
+                      + "TABLE_CAT=null; TABLE_SCHEM=adhoc; TABLE_NAME=MUTABLE_EMPLOYEES; TABLE_TYPE=TABLE; REMARKS=null; TYPE_CAT=null; TYPE_SCHEM=null; TYPE_NAME=null; SELF_REFERENCING_COL_NAME=null; REF_GENERATION=null\n"
+                      + "TABLE_CAT=null; TABLE_SCHEM=adhoc; TABLE_NAME=V; TABLE_TYPE=VIEW; REMARKS=null; TYPE_CAT=null; TYPE_SCHEM=null; TYPE_NAME=null; SELF_REFERENCING_COL_NAME=null; REF_GENERATION=null\n"
+                      + "TABLE_CAT=null; TABLE_SCHEM=metadata; TABLE_NAME=COLUMNS; TABLE_TYPE=SYSTEM TABLE; REMARKS=null; TYPE_CAT=null; TYPE_SCHEM=null; TYPE_NAME=null; SELF_REFERENCING_COL_NAME=null; REF_GENERATION=null\n"
+                      + "TABLE_CAT=null; TABLE_SCHEM=metadata; TABLE_NAME=TABLES; TABLE_TYPE=SYSTEM TABLE; REMARKS=null; TYPE_CAT=null; TYPE_SCHEM=null; TYPE_NAME=null; SELF_REFERENCING_COL_NAME=null; REF_GENERATION=null\n",
+                  CalciteAssert.toString(
+                      metaData.getTables(null, null, null, null)));
+
               // views only
               assertEquals(
                   "TABLE_CAT=null; TABLE_SCHEM=adhoc; TABLE_NAME=V; TABLE_TYPE=VIEW; REMARKS=null; TYPE_CAT=null; TYPE_SCHEM=null; TYPE_NAME=null; SELF_REFERENCING_COL_NAME=null; REF_GENERATION=null\n",
@@ -5215,7 +5337,7 @@ public class JdbcTest {
                       metaData.getTables(
                           null, "adhoc", null,
                           new String[]{
-                              Schema.TableType.VIEW.name()
+                              Schema.TableType.VIEW.jdbcName
                           })));
 
               // columns
@@ -6404,6 +6526,76 @@ public class JdbcTest {
     rs.close();
     calciteConnection.close();
 
+  }
+
+  /**
+   * Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-2054">[CALCITE-2054]
+   * Error while validating UPDATE with dynamic parameter in SET clause</a>.
+   */
+  @Test public void testUpdateBind() throws Exception {
+    String hsqldbMemUrl = "jdbc:hsqldb:mem:.";
+    try (Connection baseConnection = DriverManager.getConnection(hsqldbMemUrl);
+         Statement baseStmt = baseConnection.createStatement()) {
+      baseStmt.execute("CREATE TABLE T2 (\n"
+          + "ID INTEGER,\n"
+          + "VALS DOUBLE)");
+      baseStmt.execute("INSERT INTO T2 VALUES (1, 1.0)");
+      baseStmt.execute("INSERT INTO T2 VALUES (2, null)");
+      baseStmt.execute("INSERT INTO T2 VALUES (null, 2.0)");
+
+      baseStmt.close();
+      baseConnection.commit();
+
+      Properties info = new Properties();
+      final String model = "inline:"
+          + "{\n"
+          + "  version: '1.0',\n"
+          + "  defaultSchema: 'BASEJDBC',\n"
+          + "  schemas: [\n"
+          + "     {\n"
+          + "       type: 'jdbc',\n"
+          + "       name: 'BASEJDBC',\n"
+          + "       jdbcDriver: '" + jdbcDriver.class.getName() + "',\n"
+          + "       jdbcUrl: '" + hsqldbMemUrl + "',\n"
+          + "       jdbcCatalog: null,\n"
+          + "       jdbcSchema: null\n"
+          + "     }\n"
+          + "  ]\n"
+          + "}";
+      info.put("model", model);
+
+      Connection calciteConnection =
+          DriverManager.getConnection("jdbc:calcite:", info);
+
+      ResultSet rs = calciteConnection.prepareStatement("select * from t2")
+          .executeQuery();
+
+      assertThat(rs.next(), is(true));
+      assertThat((Integer) rs.getObject("ID"), is(1));
+      assertThat((Double) rs.getObject("VALS"), is(1.0));
+
+      assertThat(rs.next(), is(true));
+      assertThat((Integer) rs.getObject("ID"), is(2));
+      assertThat(rs.getObject("VALS"), nullValue());
+
+      assertThat(rs.next(), is(true));
+      assertThat(rs.getObject("ID"), nullValue());
+      assertThat((Double) rs.getObject("VALS"), equalTo(2.0));
+
+      rs.close();
+
+      final String sql = "update t2 set vals=? where id=?";
+      try (PreparedStatement ps =
+               calciteConnection.prepareStatement(sql)) {
+        ParameterMetaData pmd = ps.getParameterMetaData();
+        assertThat(pmd.getParameterCount(), is(2));
+        assertThat(pmd.getParameterType(1), is(Types.DOUBLE));
+        assertThat(pmd.getParameterType(2), is(Types.INTEGER));
+        ps.close();
+      }
+      calciteConnection.close();
+    }
   }
 
   /** Test case for

@@ -359,6 +359,17 @@ from orders
 window w as (partition by productId)]]>
         </Resource>
     </TestCase>
+    <TestCase name="testArrayOfRecord">
+        <Resource name="sql">
+            <![CDATA[select*from unnest(array(select*from dept))]]>
+        </Resource>
+        <Resource name="plan">
+            <![CDATA[
+LogicalProject(EXPR$0=[DOT(ITEM(DOT(ITEM($2, 1), 'SKILLS'), +(2, 3)), 'DESC')])
+  LogicalTableScan(table=[[CATALOG, SALES, DEPT_NESTED]])
+]]>
+        </Resource>
+    </TestCase>
     <TestCase name="testUnnestArray">
         <Resource name="sql">
             <![CDATA[select*from unnest(array(select*from dept))]]>
@@ -626,23 +637,35 @@ LogicalProject(DEPTNO=[$7])
     <TestCase name="testIsDistinctFrom">
         <Resource name="plan">
             <![CDATA[
-LogicalProject(EXPR$0=[CAST(CASE(IS NULL(1), IS NOT NULL(2), IS NULL(2), IS NOT NULL(1), <>(1, 2))):BOOLEAN NOT NULL])
-  LogicalValues(tuples=[[{ true }]])
+LogicalProject(EXPR$0=[CASE(IS NULL($0), IS NOT NULL($1), IS NULL($1), IS NOT NULL($0), <>(CAST($0):INTEGER NOT NULL, CAST($1):INTEGER NOT NULL))])
+  LogicalUnion(all=[true])
+    LogicalProject(EXPR$0=[null], EXPR$1=[1])
+      LogicalValues(tuples=[[{ 0 }]])
+    LogicalProject(EXPR$0=[2], EXPR$1=[null])
+      LogicalValues(tuples=[[{ 0 }]])
 ]]>
         </Resource>
         <Resource name="sql">
-            <![CDATA[select 1 is distinct from 2 from (values(true))]]>
+            <![CDATA[select empno is distinct from deptno
+from (values (cast(null as int), 1),
+              (2, cast(null as int))) as emp(empno, deptno)]]>
         </Resource>
     </TestCase>
     <TestCase name="testIsNotDistinctFrom">
         <Resource name="plan">
             <![CDATA[
-LogicalProject(EXPR$0=[CAST(CASE(IS NULL(1), IS NULL(2), IS NULL(2), IS NULL(1), =(1, 2))):BOOLEAN NOT NULL])
-  LogicalValues(tuples=[[{ true }]])
+LogicalProject(EXPR$0=[CASE(IS NULL($0), IS NULL($1), IS NULL($1), IS NULL($0), =(CAST($0):INTEGER NOT NULL, CAST($1):INTEGER NOT NULL))])
+  LogicalUnion(all=[true])
+    LogicalProject(EXPR$0=[null], EXPR$1=[1])
+      LogicalValues(tuples=[[{ 0 }]])
+    LogicalProject(EXPR$0=[2], EXPR$1=[null])
+      LogicalValues(tuples=[[{ 0 }]])
 ]]>
         </Resource>
         <Resource name="sql">
-            <![CDATA[select 1 is not distinct from 2 from (values(true))]]>
+            <![CDATA[select empno is not distinct from deptno
+from (values (cast(null as int), 1),
+             (2, cast(null as int))) as emp(empno, deptno)]]>
         </Resource>
     </TestCase>
     <TestCase name="testNotLike">
@@ -1438,6 +1461,19 @@ LogicalSort(sort0=[$0], dir0=[ASC], offset=[10], fetch=[5])
 ]]>
         </Resource>
     </TestCase>
+    <TestCase name="testOrderOffsetFetchWithDynamicParameter">
+        <Resource name="sql">
+            <![CDATA[select empno from emp
+order by empno offset ? rows fetch next ? rows only]]>
+        </Resource>
+        <Resource name="plan">
+            <![CDATA[
+LogicalSort(sort0=[$0], dir0=[ASC], offset=[?0], fetch=[?1])
+  LogicalProject(EMPNO=[$0])
+    LogicalTableScan(table=[[CATALOG, SALES, EMP]])
+]]>
+        </Resource>
+    </TestCase>
     <TestCase name="testFetch">
         <Resource name="sql">
             <![CDATA[select empno from emp fetch next 5 rows only]]>
@@ -1445,6 +1481,18 @@ LogicalSort(sort0=[$0], dir0=[ASC], offset=[10], fetch=[5])
         <Resource name="plan">
             <![CDATA[
 LogicalSort(fetch=[5])
+  LogicalProject(EMPNO=[$0])
+    LogicalTableScan(table=[[CATALOG, SALES, EMP]])
+]]>
+        </Resource>
+    </TestCase>
+    <TestCase name="testFetchWithDynamicParameter">
+        <Resource name="sql">
+            <![CDATA[select empno from emp fetch next ? rows only]]>
+        </Resource>
+        <Resource name="plan">
+            <![CDATA[
+LogicalSort(fetch=[?0])
   LogicalProject(EMPNO=[$0])
     LogicalTableScan(table=[[CATALOG, SALES, EMP]])
 ]]>
@@ -1463,6 +1511,19 @@ LogicalSort(offset=[10], fetch=[5])
 ]]>
         </Resource>
     </TestCase>
+<TestCase name="testOffsetFetchWithDynamicParameter">
+        <Resource name="sql">
+            <![CDATA[select empno from emp
+offset ? rows fetch next ? rows only]]>
+        </Resource>
+        <Resource name="plan">
+            <![CDATA[
+LogicalSort(offset=[?0], fetch=[?1])
+  LogicalProject(EMPNO=[$0])
+    LogicalTableScan(table=[[CATALOG, SALES, EMP]])
+]]>
+        </Resource>
+    </TestCase>
     <TestCase name="testOffset">
         <Resource name="sql">
             <![CDATA[select empno from emp offset 10 rows]]>
@@ -1470,6 +1531,18 @@ LogicalSort(offset=[10], fetch=[5])
         <Resource name="plan">
             <![CDATA[
 LogicalSort(offset=[10])
+  LogicalProject(EMPNO=[$0])
+    LogicalTableScan(table=[[CATALOG, SALES, EMP]])
+]]>
+        </Resource>
+    </TestCase>
+    <TestCase name="testOffsetWithDynamicParameter">
+        <Resource name="sql">
+            <![CDATA[select empno from emp offset ? rows]]>
+        </Resource>
+        <Resource name="plan">
+            <![CDATA[
+LogicalSort(offset=[?0])
   LogicalProject(EMPNO=[$0])
     LogicalTableScan(table=[[CATALOG, SALES, EMP]])
 ]]>
@@ -2034,7 +2107,7 @@ group by "$f2"]]>
         <Resource name="plan">
             <![CDATA[
 LogicalAggregate(group=[{0}], EXPR$1=[MAX($1)], EXPR$2=[MAX($2)])
-  LogicalProject($f2=[$0], EXPR$1=[$1], $f3=[+($1, 1)])
+  LogicalProject($f2=[$0], X=[$1], $f3=[+($1, 1)])
     LogicalValues(tuples=[[{ 1, 2 }]])
 ]]>
         </Resource>
@@ -2250,7 +2323,7 @@ group by cube(a, b)]]>
             <![CDATA[
 LogicalProject(EXPR$0=[1])
   LogicalAggregate(group=[{0, 1}], groups=[[{0, 1}, {0}, {1}, {}]])
-    LogicalProject(EXPR$0=[$0], EXPR$1=[$1])
+    LogicalProject(A=[$0], B=[$1])
       LogicalValues(tuples=[[{ 1, 2, 3, 4 }]])
 ]]>
         </Resource>
@@ -2265,7 +2338,7 @@ group by rollup(b, (a, d))]]>
             <![CDATA[
 LogicalProject(EXPR$0=[1])
   LogicalAggregate(group=[{0, 1, 2}], groups=[[{0, 1, 2}, {0}, {}]])
-    LogicalProject(EXPR$1=[$1], EXPR$0=[$0], EXPR$3=[$3])
+    LogicalProject(B=[$1], A=[$0], D=[$3])
       LogicalValues(tuples=[[{ 1, 2, 3, 4 }]])
 ]]>
         </Resource>
@@ -2887,6 +2960,21 @@ group by deptno]]>
             <![CDATA[
 LogicalAggregate(group=[{0}], EXPR$1=[SUM($1) FILTER $2], EXPR$2=[COUNT()])
   LogicalProject(DEPTNO=[$7], $f1=[*($5, 2)], $f2=[<($0, 10)])
+    LogicalTableScan(table=[[CATALOG, SALES, EMP]])
+]]>
+        </Resource>
+    </TestCase>
+    <TestCase name="testAggFilterWithIn">
+        <Resource name="sql">
+            <![CDATA[select
+  deptno, sum(sal * 2) filter (where empno not in (1, 2)), count(*)
+from emp
+group by deptno]]>
+        </Resource>
+        <Resource name="plan">
+            <![CDATA[
+LogicalAggregate(group=[{0}], EXPR$1=[SUM($1) FILTER $2], EXPR$2=[COUNT()])
+  LogicalProject(DEPTNO=[$7], $f1=[*($5, 2)], $f2=[AND(<>($0, 1), <>($0, 2))])
     LogicalTableScan(table=[[CATALOG, SALES, EMP]])
 ]]>
         </Resource>
@@ -3631,7 +3719,7 @@ group by d.deptno]]>
         <Resource name="plan">
             <![CDATA[
 LogicalAggregate(group=[{0}], EMPID=[MIN($1)])
-  LogicalProject(DEPTNO=[$3], EXPR$0=[$0])
+  LogicalProject(DEPTNO=[$3], EMPID=[$0])
     LogicalJoin(condition=[=($2, $3)], joinType=[inner])
       LogicalValues(tuples=[[{ 100, 'Bill', 1 }]])
       LogicalValues(tuples=[[{ 1, 'LeaderShip' }]])
@@ -3896,6 +3984,19 @@ LogicalTableModify(table=[[CATALOG, SALES, EMP]], operation=[UPDATE], updateColu
             <![CDATA[
 LogicalTableModify(table=[[CATALOG, SALES, EMP]], operation=[UPDATE], updateColumnList=[[SAL]], sourceExpressionList=[[+($cor0.SAL, ?0)]], flattened=[true])
   LogicalProject(EMPNO=[$0], ENAME=[$1], JOB=[$2], MGR=[$3], HIREDATE=[$4], SAL=[$5], COMM=[$6], DEPTNO=[$7], SLACKER=[$8], EXPR$0=[+($5, ?0)])
+    LogicalFilter(condition=[=($8, false)])
+      LogicalTableScan(table=[[CATALOG, SALES, EMP]])
+]]>
+        </Resource>
+    </TestCase>
+    <TestCase name="testUpdateBind2">
+        <Resource name="sql">
+            <![CDATA[update emp set sal = ? where slacker = false]]>
+        </Resource>
+        <Resource name="plan">
+            <![CDATA[
+LogicalTableModify(table=[[CATALOG, SALES, EMP]], operation=[UPDATE], updateColumnList=[[SAL]], sourceExpressionList=[[?0]], flattened=[true])
+  LogicalProject(EMPNO=[$0], ENAME=[$1], JOB=[$2], MGR=[$3], HIREDATE=[$4], SAL=[$5], COMM=[$6], DEPTNO=[$7], SLACKER=[$8], EXPR$0=[?0])
     LogicalFilter(condition=[=($8, false)])
       LogicalTableScan(table=[[CATALOG, SALES, EMP]])
 ]]>

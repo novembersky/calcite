@@ -19,6 +19,7 @@ package org.apache.calcite.test;
 import org.apache.calcite.DataContext;
 import org.apache.calcite.jdbc.JavaTypeFactoryImpl;
 import org.apache.calcite.plan.RelOptCluster;
+import org.apache.calcite.plan.RelOptPredicateList;
 import org.apache.calcite.plan.RelOptSchema;
 import org.apache.calcite.plan.RexImplicationChecker;
 import org.apache.calcite.rel.type.RelDataType;
@@ -30,6 +31,7 @@ import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexSimplify;
+import org.apache.calcite.rex.RexUtil;
 import org.apache.calcite.schema.SchemaPlus;
 import org.apache.calcite.schema.Schemas;
 import org.apache.calcite.server.CalciteServerStatement;
@@ -50,7 +52,9 @@ import java.sql.Date;
 import java.sql.Time;
 import java.sql.Timestamp;
 
+import static org.hamcrest.core.Is.is;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 
 /**
@@ -186,9 +190,9 @@ public class RexImplicationCheckerTest {
     f.checkNotImplies(node1, node2);
 
     final DateString dBeforeEpoch1 = DateString.fromDaysSinceEpoch(-12345);
-    final DateString dBeforeEpcoh2 = DateString.fromDaysSinceEpoch(-123);
+    final DateString dBeforeEpoch2 = DateString.fromDaysSinceEpoch(-123);
     final RexNode nodeBe1 = f.lt(f.dt, f.rexBuilder.makeDateLiteral(dBeforeEpoch1));
-    final RexNode nodeBe2 = f.lt(f.dt, f.rexBuilder.makeDateLiteral(dBeforeEpcoh2));
+    final RexNode nodeBe2 = f.lt(f.dt, f.rexBuilder.makeDateLiteral(dBeforeEpoch2));
     f.checkImplies(nodeBe1, nodeBe2);
     f.checkNotImplies(nodeBe2, nodeBe1);
   }
@@ -332,6 +336,41 @@ public class RexImplicationCheckerTest {
     f.checkNotImplies(f.gt(f.i, f.literal(10)), iIsNull);
   }
 
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-2041">[CALCITE-2041]
+   * When simplifying a nullable expression, allow the result to change type to
+   * NOT NULL</a> and
+   * {@link org.apache.calcite.rex.RexUtil.ExprSimplifier#matchNullability}. */
+  @Test public void testSimplifyCastMatchNullability() {
+    final Fixture f = new Fixture();
+    final RexUtil.ExprSimplifier defaultSimplifier =
+        new RexUtil.ExprSimplifier(f.simplify, true);
+    final RexUtil.ExprSimplifier nonMatchingNullabilitySimplifier =
+        new RexUtil.ExprSimplifier(f.simplify, false);
+
+    // The cast is nullable, while the literal is not nullable. When we simplify
+    // it, we end up with the literal. If defaultSimplifier is used, a CAST is
+    // introduced on top of the expression, as nullability of the new expression
+    // does not match the nullability of the original one. If
+    // nonMatchingNullabilitySimplifier is used, the CAST is not added and the
+    // simplified expression only consists of the literal.
+    final RexNode e = f.cast(f.intRelDataType, f.literal(2014));
+    assertThat(defaultSimplifier.apply(e).toString(),
+        is("CAST(2014):JavaType(class java.lang.Integer)"));
+    assertThat(nonMatchingNullabilitySimplifier.apply(e).toString(),
+        is("2014"));
+
+    // In this case, the cast is not nullable. Thus, in both cases, the
+    // simplified expression only consists of the literal.
+    RelDataType notNullIntRelDataType = f.typeFactory.createJavaType(int.class);
+    final RexNode e2 = f.cast(notNullIntRelDataType,
+        f.cast(notNullIntRelDataType, f.literal(2014)));
+    assertThat(defaultSimplifier.apply(e2).toString(),
+        is("2014"));
+    assertThat(nonMatchingNullabilitySimplifier.apply(e2).toString(),
+        is("2014"));
+  }
+
   /** Contains all the nourishment a test case could possibly need.
    *
    * <p>We put the data in here, rather than as fields in the test case, so that
@@ -431,7 +470,9 @@ public class RexImplicationCheckerTest {
           });
 
       executor = holder.get();
-      simplify = new RexSimplify(rexBuilder, false, executor);
+      simplify =
+          new RexSimplify(rexBuilder, RelOptPredicateList.EMPTY, false,
+              executor);
       checker = new RexImplicationChecker(rexBuilder, executor, rowType);
     }
 

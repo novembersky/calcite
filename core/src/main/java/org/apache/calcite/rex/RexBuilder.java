@@ -748,6 +748,20 @@ public class RexBuilder {
   }
 
   /**
+   * Makes a cast of a value to NOT NULL;
+   * no-op if the type already has NOT NULL.
+   */
+  public RexNode makeNotNull(RexNode exp) {
+    final RelDataType type = exp.getType();
+    if (!type.isNullable()) {
+      return exp;
+    }
+    final RelDataType notNullType =
+        typeFactory.createTypeWithNullability(type, false);
+    return makeAbstractCast(notNullType, exp);
+  }
+
+  /**
    * Creates a reference to all the fields in the row. That is, the whole row
    * as a single record object.
    *
@@ -806,6 +820,19 @@ public class RexBuilder {
    */
   public RexInputRef makeInputRef(RelNode input, int i) {
     return makeInputRef(input.getRowType().getFieldList().get(i).getType(), i);
+  }
+
+  /**
+   * Creates a reference to a given field of the pattern.
+   *
+   * @param alpha the pattern name
+   * @param type Type of field
+   * @param i    Ordinal of field
+   * @return Reference to field of pattern
+   */
+  public RexPatternFieldRef makePatternFieldRef(String alpha, RelDataType type, int i) {
+    type = SqlTypeUtil.addCharsetAndCollation(type, typeFactory);
+    return new RexPatternFieldRef(alpha, i, type);
   }
 
   /**
